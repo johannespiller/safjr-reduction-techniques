@@ -317,7 +317,7 @@
   <strong>Why this matters:</strong>
   By transforming survival data into a long-format table, any standard ML algorithm
   (random forest, XGBoost, neural network) can be applied directly — no custom survival-specific
-  loss function needed. For the piecewise exponential reduction, the
+  loss function needed. The reduction is valid because the
   <strong>Poisson likelihood on the expanded data equals the original survival likelihood</strong>.
 </div>
 
@@ -610,6 +610,456 @@ function step(dir) {
 }
 
 render();
+</script>
+
+<!-- ═══ SECTION 2 — COMPETING RISKS ═══ -->
+
+<div class="page-header" style="margin-top:3.5rem; padding-top:2rem; border-top:1px solid var(--color-border);">
+  <h1>Competing risks — two causes, one dataset expansion</h1>
+  <p>
+    This animation walks through Table 4 from <em>Reduction Techniques for Survival Analysis</em> (§6.2),
+    using three patients from the <em>sir.adm</em> ICU dataset. Each patient can experience one of two
+    competing events: <strong style="color:var(--color-text-info)">discharge alive (k=1)</strong> or
+    <strong style="color:var(--color-text-danger)">death (k=2)</strong>.
+  </p>
+</div>
+
+<div class="card">
+  <div class="progress" id="cr-progress"></div>
+  <div class="step-title" id="cr-step-title"></div>
+  <div class="svg-wrap">
+    <svg id="cr-svg" width="100%" viewBox="0 0 680 300" xmlns="http://www.w3.org/2000/svg">
+      <defs>
+        <marker id="arrow2" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+          <path d="M2 1L8 5L2 9" fill="none" stroke="context-stroke" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+        </marker>
+      </defs>
+      <g id="cr-axis"></g>
+      <g id="cr-cuts"></g>
+      <g id="cr-subjects"></g>
+      <g id="cr-intervals"></g>
+      <g id="cr-table"></g>
+    </svg>
+  </div>
+  <div class="annotation" id="cr-annotation"></div>
+  <div class="controls">
+    <button class="btn" id="cr-btn-prev" onclick="crStep(-1)" disabled>← prev</button>
+    <button class="btn btn-primary" id="cr-btn-next" onclick="crStep(1)">next →</button>
+    <span class="step-count" id="cr-step-count"></span>
+  </div>
+</div>
+
+<div class="card" style="padding:1rem 1.5rem;">
+  <div class="legend">
+    <div class="legend-item"><div class="legend-dot" style="background:#1d6fa8"></div><span>i=30238 — discharged (k=1) at day 26, pneumonia, age 38.7, M</span></div>
+    <div class="legend-item"><div class="legend-dot" style="background:#92520a"></div><span>i=41 — discharged (k=1) at day 4, no pneumonia, age 75.3, F</span></div>
+    <div class="legend-item"><div class="legend-dot" style="background:#166534"></div><span>i=17058 — died (k=2) at day 22, pneumonia, age 62.2, M</span></div>
+    <div class="legend-item">
+      <svg width="14" height="14" style="flex-shrink:0"><text x="1" y="12" font-size="13" fill="#1d6fa8">△</text></svg>
+      <span>Discharge alive (k=1) — blue box when d_ijk=1</span>
+    </div>
+    <div class="legend-item">
+      <svg width="14" height="14" style="flex-shrink:0"><text x="0" y="11" font-size="12" fill="#C0392B">✕</text></svg>
+      <span>Death (k=2) — red box when d_ijk=1</span>
+    </div>
+    <div class="legend-item">
+      <svg width="14" height="14" style="flex-shrink:0"><text x="0" y="12" font-size="14" fill="#92520a">○</text></svg>
+      <span>Censored for this cause — green box, d_ijk=0</span>
+    </div>
+  </div>
+</div>
+
+<div class="concept-card">
+  <strong>Key idea for competing risks:</strong>
+  The dataset is duplicated — one copy per cause. In the k=1 (discharge) dataset, deaths are treated
+  as censoring (d_ijk=0). In the k=2 (death) dataset, discharges are treated as censoring. Both datasets
+  are then <strong>stacked</strong> with a <em>cause</em> column added, so a single binary classifier
+  learns shared and cause-specific effects through interactions with the cause variable.
+</div>
+
+<div class="footer">
+  Reduction Techniques for Survival Analysis &nbsp;·&nbsp;
+  Interactive companion to Table 4 (§6.2) &nbsp;·&nbsp;
+  Step through with the buttons or click the dots above
+</div>
+
+<script>
+// ─── COMPETING RISKS DATA (sir.adm, Table 4) ─────────────────────────────
+// Time axis: days 0–26, cut-points every 2 days (matching paper intervals)
+// Subjects: 30238 (discharge d=1 k=1 t=26), 41 (discharge d=1 k=1 t=4), 17058 (death d=1 k=2 t=22)
+const CR_CUTS = [0,2,4,6,8,10,12,14,16,18,20,22,24,26];
+const CR_TMAX = 26;
+const CR_AX0  = 88, CR_AX1 = 590, CR_AY = 52;
+function crTx(t) { return CR_AX0 + (t / CR_TMAX) * (CR_AX1 - CR_AX0); }
+
+const CR_SVG_NS = "http://www.w3.org/2000/svg";
+function crEl(tag, attrs, text) {
+  const e = document.createElementNS(CR_SVG_NS, tag);
+  for (const [k,v] of Object.entries(attrs||{})) e.setAttribute(k,v);
+  if (text !== undefined) e.textContent = text;
+  return e;
+}
+
+// k=0 means censored, k=1 discharge, k=2 death
+const CR_SUBJECTS = [
+  { id:"30238", t:26, k:1, pneu:1, age:38.7, sex:"M", color:"#1d6fa8" },
+  { id:"41",    t:4,  k:1, pneu:0, age:75.3, sex:"F", color:"#92520a" },
+  { id:"17058", t:22, k:2, pneu:1, age:62.2, sex:"M", color:"#166534" },
+];
+
+// Which cause we are currently viewing (null = both/raw, 1, or 2)
+// Steps control this via the `cause` property
+const CR_STEPS = [
+  {
+    title: "Step 1 — three ICU patients, raw data",
+    cause: null,
+    showTable: false,
+    annotation: "Three patients from the sir.adm ICU study. Patient 30238 and 41 were discharged alive (△); patient 17058 died (✕). These are competing events — only one can happen first."
+  },
+  {
+    title: "Step 2 — place cut-points (intervals of 2 days)",
+    cause: null,
+    showCuts: true,
+    showTable: false,
+    annotation: "The follow-up is partitioned into 2-day intervals matching the paper. Each patient will contribute one row per interval they remain at risk."
+  },
+  {
+    title: "Step 3 — long-format dataset for cause k=1 (discharge)",
+    cause: 1,
+    showCuts: true,
+    showTable: true,
+    annotation: "For k=1 (discharge): patient 30238 has 13 intervals ending in d_ijk=1 (discharge) in the last one. Patient 41 has 2 intervals, also ending in discharge. Patient 17058 has 11 intervals — but because they died (not discharged), their last d_ijk=0. Death is treated as censoring for this cause."
+  },
+  {
+    title: "Step 4 — long-format dataset for cause k=2 (death)",
+    cause: 2,
+    showCuts: true,
+    showTable: true,
+    annotation: "For k=2 (death): now patient 17058 ends with d_ijk=1 in interval 11. Patients 30238 and 41 end with d_ijk=0 — their discharges are treated as censoring for this cause. Same rows, different event indicator."
+  },
+  {
+    title: "Step 5 — stack both datasets with a cause column",
+    cause: "both",
+    showCuts: true,
+    showTable: true,
+    annotation: "Both cause-specific datasets are stacked. A column 'cause' (1 or 2) is added to every row. A single binary classifier can now be trained on the stacked data, learning cause-specific effects through interactions with the cause variable."
+  },
+];
+
+let crCurrent = 0;
+
+function crClear(id) { document.getElementById(id).innerHTML = ""; }
+
+function crRenderAxis() {
+  const g = document.getElementById("cr-axis");
+  g.innerHTML = "";
+  g.appendChild(crEl("line", { x1:CR_AX0-10, y1:CR_AY, x2:CR_AX1+12, y2:CR_AY,
+    stroke:"var(--color-text-secondary)", "stroke-width":"1", "marker-end":"url(#arrow2)" }));
+  g.appendChild(crEl("text", { x:CR_AX1+20, y:CR_AY+4, class:"ts", "text-anchor":"start" }, "days"));
+  // tick at 0
+  g.appendChild(crEl("text", { x:CR_AX0, y:CR_AY-10, class:"ts", "text-anchor":"middle" }, "0"));
+}
+
+function crRenderCuts() {
+  const g = document.getElementById("cr-cuts");
+  g.innerHTML = "";
+  // label every other cut-point to avoid crowding (13 cut-points total)
+  CR_CUTS.forEach((c,i) => {
+    const x = crTx(c);
+    g.appendChild(crEl("line", { x1:x, y1:CR_AY-6, x2:x, y2:CR_AY+6,
+      stroke:"var(--color-text-secondary)", "stroke-width":"1" }));
+    if (i % 2 === 0) {
+      g.appendChild(crEl("text", { x, y:CR_AY+17, class:"ts", "text-anchor":"middle" },
+        `a${i}=${c}`));
+    }
+  });
+}
+
+function crSubjectY(si, cause) {
+  // give more vertical room in step 5 (both) so covariate + k=1 + k=2 labels don't collide
+  const spacing = (cause === "both") ? 58 : 46;
+  return 96 + si * spacing;
+}
+
+function crRenderSubjects(cause, showCuts) {
+  const g = document.getElementById("cr-subjects");
+  g.innerHTML = "";
+  CR_SUBJECTS.forEach((s,i) => {
+    const y = crSubjectY(i, cause);
+    const xEnd = crTx(s.t);
+
+    // label
+    g.appendChild(crEl("text", { x:82, y:y+4, class:"ts", "text-anchor":"end",
+      fill:s.color, "font-weight":"600" }, `i=${s.id}`));
+
+    // track
+    g.appendChild(crEl("line", { x1:crTx(0), x2:crTx(CR_TMAX), y1:y, y2:y,
+      stroke:"var(--color-border)", "stroke-width":"1.5" }));
+
+    // only draw the solid bar when no interval boxes yet (cause is null = steps 1 & 2)
+    if (cause === null) {
+      let opacity = "1";
+      if (cause === 1 && s.k === 2) opacity = "0.35";
+      if (cause === 2 && s.k === 1) opacity = "0.35";
+      const bar = crEl("line", { x1:crTx(0), x2:xEnd, y1:y, y2:y,
+        stroke:s.color, "stroke-width":"5", "stroke-linecap":"round", opacity });
+      bar.classList.add("fade-in");
+      g.appendChild(bar);
+
+      // endpoint marker
+      let marker, markerColor;
+      if (cause === null || cause === "both") {
+        markerColor = s.color;
+        marker = s.k === 1 ? "△" : "✕";
+      } else {
+        markerColor = (s.k === cause) ? s.color : "#92520a";
+        marker = (s.k === cause) ? (cause === 1 ? "△" : "✕") : "○";
+      }
+      const ep = crEl("text", { x:xEnd+4, y:y+4, class:"ts", fill:markerColor, "font-size":"13" }, marker);
+      ep.classList.add("fade-in");
+      g.appendChild(ep);
+    }
+
+    // feature labels on right — drop age, show pneu + sex
+    // When cause=both, move covariate label above the row to avoid clash with k=1/k=2 labels
+    const covLabel = `pneu=${s.pneu} ${s.sex}`;
+    const covY = (cause === "both") ? y - 18 : y + 4;
+    g.appendChild(crEl("text", { x:CR_AX1 + 22, y:covY, class:"ts",
+      "font-size":"9", fill:"var(--color-text-secondary)" }, covLabel));
+  });
+}
+
+function crRenderIntervals(cause) {
+  // Draw coloured interval boxes on the timeline — same style as first animation
+  // green = d_ijk=0 (censored for this cause), blue = discharge event, red = death event
+  const g = document.getElementById("cr-intervals");
+  g.innerHTML = "";
+
+  // cause colours for event cells
+  const EVENT_FILL   = { 1:"#dbeafe", 2:"#fee2e2" };
+  const EVENT_STROKE = { 1:"#93c5fd", 2:"#f87171" };
+  const EVENT_TEXT   = { 1:"var(--color-text-info)", 2:"var(--color-text-danger)" };
+  const CENSOR_FILL   = "var(--color-bg-success)";
+  const CENSOR_STROKE = "#86efac";
+  const CENSOR_TEXT   = "var(--color-text-success)";
+
+  const causes = cause === "both" ? [1,2] : [cause];
+
+  CR_SUBJECTS.forEach((s, si) => {
+    const y = crSubjectY(si, cause);
+
+    // for "both", show k=1 boxes slightly above and k=2 slightly below centre
+    const yOffsets = cause === "both" ? { 1:-6, 2:6 } : { 1:0, 2:0 };
+
+    causes.forEach(k => {
+      const yOff = yOffsets[k];
+      const boxH = cause === "both" ? 14 : 20;
+
+      CR_CUTS.slice(0,-1).forEach((a, j) => {
+        const aNext = CR_CUTS[j+1];
+        if (a >= s.t) return;
+
+        const x1 = crTx(a);
+        const x2 = crTx(Math.min(aNext, s.t));
+        const dijk = (s.t > a && s.t <= aNext && s.k === k) ? 1 : 0;
+        const midX = (x1 + x2) / 2;
+        const boxW = Math.max(1, x2 - x1 - 1);
+
+        const fill   = dijk ? EVENT_FILL[k]   : CENSOR_FILL;
+        const stroke = dijk ? EVENT_STROKE[k] : CENSOR_STROKE;
+
+        const rect = crEl("rect", {
+          x: x1 + 0.5, y: y - (boxH/2) + yOff,
+          width: boxW, height: boxH,
+          fill, stroke, "stroke-width":"0.75", rx:"3"
+        });
+        rect.classList.add("fade-in");
+        g.appendChild(rect);
+
+        // label 0/1 inside cell if wide enough
+        if (x2 - x1 > 14) {
+          const textFill = dijk ? EVENT_TEXT[k] : CENSOR_TEXT;
+          const lbl = crEl("text", {
+            x: midX, y: y + yOff + 4,
+            class:"ts", "text-anchor":"middle",
+            fill: textFill, "font-weight": dijk ? "700" : "400",
+            "font-size":"9"
+          }, dijk ? "1" : "0");
+          lbl.classList.add("fade-in");
+          g.appendChild(lbl);
+        }
+      });
+
+      // cause label on right if showing both — sits at the same yOff as its boxes
+      if (cause === "both") {
+        const labelColor = k === 1 ? "var(--color-text-info)" : "var(--color-text-danger)";
+        g.appendChild(crEl("text", {
+          x: CR_AX1 + 22, y: y + yOff + 4,
+          class:"ts", "font-size":"9", "font-weight":"600", fill: labelColor
+        }, `k=${k}`));
+      }
+    });
+  });
+}
+
+function crBuildRows(cause) {
+  // cause = 1, 2, or "both"
+  const rows = [];
+
+  if (cause === "both") {
+    // Sort subjects by id ascending (41, 17058, 30238) then stack k=1 and k=2 per subject
+    const sorted = [...CR_SUBJECTS].sort((a,b) => Number(a.id) - Number(b.id));
+    sorted.forEach(s => {
+      [1,2].forEach(k => {
+        CR_CUTS.slice(0,-1).forEach((a,j) => {
+          const aNext = CR_CUTS[j+1];
+          if (a >= s.t) return;
+          const tij = +(Math.min(aNext, s.t) - a).toFixed(1);
+          const dijk = (s.t > a && s.t <= aNext && s.k === k) ? 1 : 0;
+          rows.push({ i:s.id, j:j+1, interval:`(${a},${aNext}]`, dijk, tij,
+            pneu:s.pneu, age:s.age, sex:s.sex, cause:k, color:s.color });
+        });
+      });
+    });
+  } else {
+    CR_SUBJECTS.forEach(s => {
+      CR_CUTS.slice(0,-1).forEach((a,j) => {
+        const aNext = CR_CUTS[j+1];
+        if (a >= s.t) return;
+        const tij = +(Math.min(aNext, s.t) - a).toFixed(1);
+        const dijk = (s.t > a && s.t <= aNext && s.k === cause) ? 1 : 0;
+        rows.push({ i:s.id, j:j+1, interval:`(${a},${aNext}]`, dijk, tij,
+          pneu:s.pneu, age:s.age, sex:s.sex, cause, color:s.color });
+      });
+    });
+  }
+  return rows;
+}
+
+function crRenderTable(cause) {
+  const g = document.getElementById("cr-table");
+  g.innerHTML = "";
+
+  const rows = crBuildRows(cause);
+
+  const tableY = cause === "both" ? 282 : 248;
+  const cols = [
+    { h:"i",      w:46 },
+    { h:"j",      w:22 },
+    { h:"Iⱼ",    w:60 },
+    { h:"dᵢⱼₖ",  w:38 },
+    { h:"tᵢⱼ",   w:32 },
+    { h:"pneu",   w:34 },
+    { h:"age",    w:36 },
+    { h:"sex",    w:24 },
+    { h:"cause",  w:36 },
+  ];
+
+  let cx = CR_AX0;
+  const colXArr = cols.map(c => { const x = cx; cx += c.w; return x; });
+
+  // header bg
+  g.appendChild(crEl("rect", { x:CR_AX0-4, y:tableY-14, width:cx-CR_AX0+8, height:16,
+    fill:"var(--color-border)", rx:"3" }));
+  cols.forEach((c,ci) => {
+    g.appendChild(crEl("text", { x:colXArr[ci], y:tableY-3, class:"ts",
+      "font-weight":"600", fill:"var(--color-text-primary)" }, c.h));
+  });
+
+  const MAX_ROWS = 18;
+  const displayRows = rows.slice(0, MAX_ROWS);
+
+  // For "both" mode, draw separator lines between subject blocks
+  // Track where each new subject id starts
+  let prevId = null;
+
+  displayRows.forEach((r,ri) => {
+    const ry = tableY + 14 + ri * 14;
+
+    // Draw separator before each new subject block (in both mode)
+    if (cause === "both" && r.i !== prevId && ri > 0) {
+      g.appendChild(crEl("line", {
+        x1: CR_AX0-4, y1: ry-11,
+        x2: cx+4,     y2: ry-11,
+        stroke:"var(--color-text-secondary)", "stroke-width":"0.75", opacity:"0.4"
+      }));
+    }
+    prevId = r.i;
+
+    if (ri % 2 === 0) {
+      g.appendChild(crEl("rect", { x:CR_AX0-4, y:ry-10, width:cx-CR_AX0+8, height:13,
+        fill:"var(--color-border)", rx:"2", opacity:"0.3" }));
+    }
+    const causeColor = r.cause === 1 ? "var(--color-text-info)" : "var(--color-text-danger)";
+    const vals = [r.i, r.j, r.interval, r.dijk, r.tij, r.pneu, r.age, r.sex, r.cause];
+    vals.forEach((v,ci) => {
+      const isEvent = ci === 3 && r.dijk === 1;
+      const isCause = ci === 8;
+      const fill = ci === 0 ? r.color
+                 : isEvent  ? "var(--color-text-danger)"
+                 : isCause  ? causeColor
+                 : "var(--color-text-primary)";
+      const txt = crEl("text", { x:colXArr[ci], y:ry, class:"ts", fill,
+        "font-weight": isEvent ? "700" : ci === 0 ? "600" : "400",
+        "font-size":"9" }, v);
+      txt.classList.add("fade-in");
+      g.appendChild(txt);
+    });
+  });
+
+  if (rows.length > MAX_ROWS) {
+    const ry = tableY + 14 + MAX_ROWS * 14;
+    g.appendChild(crEl("text", { x:CR_AX0, y:ry, class:"ts",
+      fill:"var(--color-text-secondary)", "font-style":"italic" },
+      `… ${rows.length - MAX_ROWS} more rows not shown`));
+  }
+
+  const newH = tableY + 20 + Math.min(rows.length, MAX_ROWS + 1) * 14 + 10;
+  document.getElementById("cr-svg").setAttribute("viewBox", `0 0 680 ${newH}`);
+}
+
+function crRender() {
+  const s = CR_STEPS[crCurrent];
+
+  const isBoth = s.cause === "both";
+  document.getElementById("cr-svg").setAttribute("viewBox", `0 0 680 ${isBoth ? 280 : 248}`);
+  crClear("cr-axis"); crClear("cr-cuts"); crClear("cr-subjects");
+  crClear("cr-intervals"); crClear("cr-table");
+
+  crRenderAxis();
+  if (s.showCuts)  crRenderCuts();
+  crRenderSubjects(s.cause, s.showCuts);
+  if (s.showCuts && s.cause !== null) crRenderIntervals(s.cause);
+  if (s.showTable) crRenderTable(s.cause);
+
+  document.getElementById("cr-step-title").textContent = s.title;
+  document.getElementById("cr-annotation").textContent = s.annotation;
+  document.getElementById("cr-step-count").textContent = `step ${crCurrent+1} of ${CR_STEPS.length}`;
+  document.getElementById("cr-btn-prev").disabled = crCurrent === 0;
+  document.getElementById("cr-btn-next").disabled = crCurrent === CR_STEPS.length-1;
+  document.getElementById("cr-btn-next").textContent = crCurrent === CR_STEPS.length-1 ? "done ✓" : "next →";
+
+  const prog = document.getElementById("cr-progress");
+  prog.innerHTML = "";
+  CR_STEPS.forEach((_,i) => {
+    const dot = document.createElement("button");
+    dot.className = "dot" + (i===crCurrent ? " active" : i<crCurrent ? " done" : "");
+    dot.setAttribute("aria-label", `Go to step ${i+1}`);
+    dot.onclick = () => { crCurrent = i; crRender(); };
+    prog.appendChild(dot);
+  });
+  const cnt = document.createElement("span");
+  cnt.className = "step-count";
+  cnt.textContent = `${crCurrent+1} / ${CR_STEPS.length}`;
+  prog.appendChild(cnt);
+}
+
+function crStep(dir) {
+  crCurrent = Math.max(0, Math.min(CR_STEPS.length-1, crCurrent+dir));
+  crRender();
+}
+
+crRender();
 </script>
 </body>
 </html>
