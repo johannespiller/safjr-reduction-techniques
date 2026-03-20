@@ -362,9 +362,9 @@ const STEPS = [
   },
   {
     title: "Step 3 — expand to long format",
-    show: ["axis","subjects","cuts","intervals"],
+    show: ["axis","subjects","cuts","intervals","table"],
     trunc: false,
-    annotation: "Each subject now gets one row per interval they are at risk. Subject 2 only reaches the first interval. Subject 3 spans all five. The event indicator d_ij = 1 only in the final interval where the event actually occurs — all earlier intervals get d_ij = 0."
+    annotation: "Each subject now gets one row per interval they are at risk. Subject 2 only reaches the first interval. Subject 3 spans all five. The event indicator d_ij = 1 only in the final interval where the event actually occurs — all earlier intervals get d_ij = 0. Each row also records the time-at-risk t_ij and the offset o_ij = log(t_ij)."
   },
   {
     title: "Step 4 — incorporate left-truncation",
@@ -373,10 +373,10 @@ const STEPS = [
     annotation: "Subject 1 only enters the risk set at t_L=0.5 (they were not observable before then — e.g. they hadn't yet enrolled). Subject 3 enters at t_L=1.4. Intervals before the truncation time are simply removed from the dataset."
   },
   {
-    title: "Step 5 — long-format data ready for modelling",
+    title: "Step 5 — long-format data with left-truncation, ready for modelling",
     show: ["axis","subjects","cuts","intervals","table"],
     trunc: true,
-    annotation: "The final dataset has one row per (subject, interval) pair. Each row has an event indicator d_ij, a time-at-risk t_ij, an offset log(t_ij), and all original features. Any regression or classification algorithm can now be applied without modification."
+    annotation: "Compared to step 3, rows before the truncation entry point are dropped. Subject 1 loses its first interval; subject 3 loses its first two. Everything else is identical — any regression or classification algorithm can now be applied without modification."
   },
 ];
 
@@ -564,7 +564,7 @@ function render() {
   const trunc = s.trunc;
 
   // reset SVG height
-  document.getElementById("main-svg").setAttribute("viewBox", "0 0 680 260");
+  document.getElementById("main-svg").setAttribute("viewBox", "0 0 680 280");
 
   clear("g-axis"); clear("g-cuts"); clear("g-subjects");
   clear("g-intervals"); clear("g-table");
